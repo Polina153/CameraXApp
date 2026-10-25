@@ -10,8 +10,6 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.video.FileOutputOptions
-import androidx.camera.video.Quality
-import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoRecordEvent
@@ -27,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,7 +47,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.io.File
-import java.util.function.Consumer
 
 @Composable
 fun CameraScreen() {
@@ -59,8 +57,7 @@ fun CameraScreen() {
     var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.CAMERA
+                context, Manifest.permission.CAMERA
             ) == PackageManager.PERMISSION_GRANTED
         )
     }
@@ -79,12 +76,10 @@ fun CameraScreen() {
 
     if (!hasCameraPermission) {
         Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
+            modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center
         ) {
             Text(
-                text = "Разрешите доступ к камере",
-                fontSize = 18.sp
+                text = "Разрешите доступ к камере", fontSize = 18.sp
             )
         }
         return
@@ -93,8 +88,7 @@ fun CameraScreen() {
     val cameraController = remember {
         LifecycleCameraController(context).apply {
             setEnabledUseCases(
-                LifecycleCameraController.IMAGE_CAPTURE or
-                        LifecycleCameraController.VIDEO_CAPTURE
+                LifecycleCameraController.IMAGE_CAPTURE or LifecycleCameraController.VIDEO_CAPTURE
             )
             cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
         }
@@ -108,52 +102,52 @@ fun CameraScreen() {
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
 
     val recorder = remember {
-        Recorder.Builder()
-            .setQualitySelector(QualitySelector.from(Quality.HD))
-            .build()
+        Recorder.Builder().setQualitySelector(
+            androidx.camera.video.QualitySelector.from(
+                androidx.camera.video.Quality.HD
+            )
+        ).build()
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { context ->
-                PreviewView(context).apply {
+            modifier = Modifier.fillMaxSize(), factory = { ctx ->
+                PreviewView(ctx).apply {
                     controller = cameraController
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                 }
-            }
-        )
+            })
 
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Bottom,
             modifier = Modifier
+                .align(Alignment.BottomCenter)         // явное позиционирование внизу
                 .fillMaxWidth()
-                .padding(bottom = 40.dp)
+                .safeDrawingPadding()                  // учитывает systemBars + displayCutout + ime
+                .padding(bottom = 40.dp)               // дополнительный отступ от safe-area
         ) {
             Button(
                 onClick = {
                     if (isRecording) {
+                        // остановка записи: сброс состояния произойдёт в onFinalize
                         activeRecording?.stop()
                     } else {
                         takePhoto(context = context, cameraController)
                     }
-                }
-            ) {
+                }) {
                 Icon(
                     painter = painterResource(
                         if (isRecording) R.drawable.stop
                         else R.drawable.camera_24
-                    ),
-                    contentDescription = if (isRecording) "Stop" else "Take Photo"
+                    ), contentDescription = if (isRecording) "Stop" else "Take Photo"
                 )
             }
 
             Spacer(Modifier.height(8.dp))
 
             Row(
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                modifier = Modifier.fillMaxWidth()
+                horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()
             ) {
                 IconButton(onClick = { toggleCamera(cameraController) }) {
                     Icon(
@@ -163,23 +157,25 @@ fun CameraScreen() {
                 }
 
                 Switch(
-                    checked = isRecording,
-                    onCheckedChange = { checked ->
+                    checked = isRecording, onCheckedChange = { checked ->
                         if (checked) {
                             activeRecording = startRecording(
                                 context = context,
                                 controller = cameraController,
                                 recorder = recorder,
-                                cacheDir = cacheDir
-                            )
+                                cacheDir = cacheDir,
+                                onFinalize = {
+                                    // вызывается CameraX по завершении записи (и по успеху, и по ошибке) — синхронизирует Switch
+                                    isRecording = false
+                                    activeRecording = null
+                                })
                             isRecording = true
                         } else {
                             activeRecording?.stop()
                             activeRecording = null
                             isRecording = false
                         }
-                    }
-                )
+                    })
 
                 IconButton(onClick = { toggleFlash(cameraController) }) {
                     Icon(
@@ -194,9 +190,7 @@ fun CameraScreen() {
 
 private fun takePhoto(context: Context, controller: LifecycleCameraController) {
     val outputFile = File.createTempFile(
-        "photo_",
-        ".jpg",
-        context.cacheDir
+        "photo_", ".jpg", context.cacheDir
     )
 
     val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
@@ -212,15 +206,15 @@ private fun takePhoto(context: Context, controller: LifecycleCameraController) {
             override fun onError(exception: ImageCaptureException) {
                 Log.d("Фото", "Ошибка фото: ${exception.message}")
             }
-        }
-    )
+        })
 }
 
 private fun startRecording(
     context: Context,
     controller: LifecycleCameraController,
-    recorder: Recorder,
-    cacheDir: File
+    recorder: Recorder, //todo ничего не делает?
+    cacheDir: File,
+    onFinalize: () -> Unit,
 ): Recording {
     val videoFile = File.createTempFile("video_", ".mp4", cacheDir)
 
@@ -232,24 +226,20 @@ private fun startRecording(
         outputOptions,
         audioConfig,
         executor,
-        object : Consumer<VideoRecordEvent>, androidx.core.util.Consumer<VideoRecordEvent> {
-            override fun accept(event: VideoRecordEvent) {
-                when (event) {
-                    is VideoRecordEvent.Finalize -> {
-                        if (event.hasError()) {
-                            Log.d("Видео", "Ошибка записи: ${event.error}")
-                        } else {
-                            println(
-                                Log.d("Видео", "Видео сохранено: ${event.outputResults.outputUri}")
-                            )
-                        }
+        androidx.core.util.Consumer<VideoRecordEvent> { event ->
+            when (event) {
+                is VideoRecordEvent.Finalize -> {
+                    if (event.hasError()) {
+                        Log.d("Видео", "Ошибка записи: ${event.error}")
+                    } else {
+                        Log.d("Видео", "Видео сохранено: ${event.outputResults.outputUri}")
                     }
-
-                    else -> Unit
+                    onFinalize()
                 }
+
+                else -> Unit
             }
-        }
-    )
+        })
 }
 
 private fun toggleCamera(controller: LifecycleCameraController) {
