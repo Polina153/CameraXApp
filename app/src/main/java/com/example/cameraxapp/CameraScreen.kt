@@ -1,8 +1,13 @@
 package com.example.cameraxapp
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -10,7 +15,8 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.video.FileOutputOptions
-import androidx.camera.video.Recorder
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.LifecycleCameraController
@@ -36,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +53,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.File
 
 @Composable
@@ -53,6 +63,8 @@ fun CameraScreen() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cacheDir = context.cacheDir
+    val scope = rememberCoroutineScope()
+
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -90,6 +102,7 @@ fun CameraScreen() {
             setEnabledUseCases(
                 LifecycleCameraController.IMAGE_CAPTURE or LifecycleCameraController.VIDEO_CAPTURE
             )
+            videoCaptureQualitySelector = QualitySelector.from(Quality.HD)
             cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
         }
     }
@@ -101,13 +114,6 @@ fun CameraScreen() {
     var isRecording by remember { mutableStateOf(false) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
 
-    val recorder = remember {
-        Recorder.Builder().setQualitySelector(
-            androidx.camera.video.QualitySelector.from(
-                androidx.camera.video.Quality.HD
-            )
-        ).build()
-    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
@@ -162,7 +168,7 @@ fun CameraScreen() {
                             activeRecording = startRecording(
                                 context = context,
                                 controller = cameraController,
-                                recorder = recorder,
+                                scope = scope,
                                 cacheDir = cacheDir,
                                 onFinalize = {
                                     // вызывается CameraX по завершении записи (и по успеху, и по ошибке) — синхронизирует Switch
@@ -189,37 +195,53 @@ fun CameraScreen() {
 }
 
 private fun takePhoto(context: Context, controller: LifecycleCameraController) {
-    val outputFile = File.createTempFile(
-        "photo_", ".jpg", context.cacheDir
-    )
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, "photo_${System.currentTimeMillis()}.jpg")
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(
+                MediaStore.Images.Media.RELATIVE_PATH,
+                "${Environment.DIRECTORY_PICTURES}/CameraXApp"
+            )
+        }
+    }
 
-    val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
+    val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    } else {
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+    }
+
+    val options = ImageCapture.OutputFileOptions
+        .Builder(context.contentResolver, collection, values)
+        .build()
 
     controller.takePicture(
-        outputOptions,
+        options,
         ContextCompat.getMainExecutor(context),
         object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                Log.d("Фото", "Фото сохранено: ${outputFileResults.savedUri}")
+                Log.d("Фото", "В галерее: ${outputFileResults.savedUri}")
             }
 
             override fun onError(exception: ImageCaptureException) {
-                Log.d("Фото", "Ошибка фото: ${exception.message}")
+                Log.d("Фото", "Ошибка: ${exception.message}")
             }
-        })
+        }
+    )
 }
 
 private fun startRecording(
     context: Context,
     controller: LifecycleCameraController,
-    recorder: Recorder, //todo ничего не делает?
     cacheDir: File,
     onFinalize: () -> Unit,
+    scope: CoroutineScope,
 ): Recording {
     val videoFile = File.createTempFile("video_", ".mp4", cacheDir)
 
     val outputOptions = FileOutputOptions.Builder(videoFile).build()
-    val audioConfig = AudioConfig.AUDIO_DISABLED// или AudioConfig.AUDIO_DISABLED
+    val audioConfig = AudioConfig.AUDIO_DISABLED
     val executor = ContextCompat.getMainExecutor(context)
 
     return controller.startRecording(
@@ -231,8 +253,13 @@ private fun startRecording(
                 is VideoRecordEvent.Finalize -> {
                     if (event.hasError()) {
                         Log.d("Видео", "Ошибка записи: ${event.error}")
+                        videoFile.delete()
                     } else {
                         Log.d("Видео", "Видео сохранено: ${event.outputResults.outputUri}")
+                        scope.launch(Dispatchers.IO) {
+                            val published = publishVideoToGallery(context, videoFile)
+                            Log.d("Видео", "В галерее: $published")
+                        }
                     }
                     onFinalize()
                 }
@@ -242,12 +269,53 @@ private fun startRecording(
         })
 }
 
+private fun publishVideoToGallery(context: Context, file: File): Uri? {
+    val values = ContentValues().apply {
+        put(MediaStore.Video.Media.DISPLAY_NAME, "video_${System.currentTimeMillis()}.mp4")
+        put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(
+                MediaStore.Video.Media.RELATIVE_PATH,
+                "${Environment.DIRECTORY_MOVIES}/CameraXApp"
+            )
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+    }
+
+    val resolver = context.contentResolver
+    val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    } else {
+        MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+    }
+
+    val uri = resolver.insert(collection, values) ?: return null
+    return try {
+        resolver.openOutputStream(uri)?.use { out ->
+            file.inputStream().use { it.copyTo(out) }
+        } ?: error("openOutputStream вернул null")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            resolver.update(uri, ContentValues().apply {
+                put(MediaStore.Video.Media.IS_PENDING, 0)
+            }, null, null)
+        }
+        file.delete()
+        uri
+    } catch (t: Throwable) {
+        Log.d("Видео", "Не удалось опубликовать: ${t.message}")
+        resolver.delete(uri, null, null)
+        null
+    }
+}
+
 private fun toggleCamera(controller: LifecycleCameraController) {
     controller.cameraSelector =
         if (controller.cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) {
             CameraSelector.DEFAULT_BACK_CAMERA
         } else {
             CameraSelector.DEFAULT_FRONT_CAMERA
+
         }
 }
 
